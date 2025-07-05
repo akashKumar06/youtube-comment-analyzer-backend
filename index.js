@@ -3,77 +3,129 @@ import cors from "cors";
 import fetch from "node-fetch";
 import { LanguageServiceClient } from "@google-cloud/language";
 
-const PORT = process.env.PORT;
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-const corsOptions = {
-  origin: "*",
-  methods: "GET,OPTIONS",
-  allowedHeaders: "Content-Type,Authorization",
-  credentials: true,
-  optionsSuccessStatus: 200,
-};
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+const GOOGLE_APPLICATION_CREDENTIALS =
+  process.env.GOOGLE_APPLICATION_CREDENTIALS; // Path to your service account key file
 
-app.use(cors(corsOptions));
-app.use(express.json());
-
-// --- Google Cloud Natural Language API Client Initialization ---
 let languageClient;
 try {
-  if (process.env.GOOGLE_CLOUD_NATURAL_LANGUAGE_KEY_JSON) {
-    // For Render deployment, where the key JSON is stored in an environment variable
+  // Initialize Natural Language Client only if GOOGLE_APPLICATION_CREDENTIALS is set
+  if (GOOGLE_APPLICATION_CREDENTIALS) {
     languageClient = new LanguageServiceClient({
-      credentials: JSON.parse(
-        process.env.GOOGLE_CLOUD_NATURAL_LANGUAGE_KEY_JSON
-      ),
+      keyFilename: GOOGLE_APPLICATION_CREDENTIALS,
     });
-    console.log(
-      "Natural Language Client initialized using GOOGLE_CLOUD_NATURAL_LANGUAGE_KEY_JSON."
-    );
-  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    // For deployments where a JSON key file is mounted and path is set via GOOGLE_APPLICATION_CREDENTIALS
-    languageClient = new LanguageServiceClient();
-    console.log(
-      "Natural Language Client initialized using GOOGLE_APPLICATION_CREDENTIALS."
-    );
+    console.log("Google Cloud Natural Language Client initialized.");
   } else {
-    // For local development, if you rely on `gcloud auth application-default login` or no explicit env var
-    languageClient = new LanguageServiceClient();
     console.warn(
-      "Natural Language Client initialized without explicit JSON key or GOOGLE_APPLICATION_CREDENTIALS. Ensure credentials are set via gcloud CLI or environment variable."
+      "GOOGLE_APPLICATION_CREDENTIALS environment variable not set. Natural Language API will not function."
     );
   }
 } catch (error) {
-  console.error("Failed to initialize Natural Language Client:", error);
-  // You might want to exit or handle this more gracefully depending on your app's needs
-  // process.exit(1);
+  console.error(
+    "Failed to initialize Google Cloud Natural Language Client:",
+    error
+  );
+  languageClient = null; // Ensure client is null on initialization failure
 }
 
-app.get("/", (req, res) => {
-  return res.send("Youtube comment analyzer backend is running.");
-});
+app.use(cors()); // Enable CORS for all origins
+app.use(express.json()); // For parsing application/json
 
+// YouTube Comment Analysis Endpoint
 app.get("/comments", async (req, res) => {
+  // Ensure videoCategory is always declared at the top level of the handler
+  let videoCategory = "Unknown";
+
   try {
     const videoId = req.query.videoId;
     let pageToken = req.query.pageToken || null;
 
-    if (!videoId)
+    if (!videoId) {
       return res.status(400).json({ message: "Missing videoId parameter" });
+    }
 
     if (!YOUTUBE_API_KEY) {
       console.error("YOUTUBE_API_KEY environment variable is not set!");
-      return res
-        .status(500)
-        .json({ message: "Server configuration error: API Key missing." });
+      return res.status(500).json({
+        message: "Server configuration error: YouTube API Key missing.",
+      });
     }
 
+    if (!languageClient) {
+      console.error(
+        "Natural Language Client is not initialized or failed to initialize."
+      );
+      return res.status(500).json({
+        message:
+          "Server configuration error: Natural Language API client not ready.",
+      });
+    }
+
+    // --- Fetch Video Details (including category) ---
+    try {
+      const videoApiUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${YOUTUBE_API_KEY}`;
+      const videoResponse = await fetch(videoApiUrl);
+      const videoData = await videoResponse.json();
+
+      if (videoResponse.ok && videoData.items && videoData.items.length > 0) {
+        const categoryId = videoData.items[0].snippet.categoryId;
+        // Simple mapping for common categories. For a full list, you'd query YouTube's videoCategories API.
+        const categoryMap = {
+          1: "Film & Animation",
+          2: "Autos & Vehicles",
+          10: "Music",
+          15: "Pets & Animals",
+          17: "Sports",
+          19: "Travel & Events",
+          20: "Gaming",
+          22: "People & Blogs",
+          23: "Comedy",
+          24: "Entertainment",
+          25: "News & Politics",
+          26: "Howto & Style",
+          27: "Education",
+          28: "Science & Technology",
+          29: "Nonprofits & Activism",
+          30: "Movies",
+          31: "Anime/Animation",
+          32: "Action/Adventure",
+          33: "Classics",
+          34: "Comedy (Film)",
+          35: "Documentary",
+          36: "Drama",
+          37: "Family",
+          38: "Foreign",
+          39: "Horror",
+          40: "Sci-Fi/Fantasy",
+          41: "Thriller",
+          42: "Shorts",
+          43: "Shows",
+          44: "Trailers",
+        };
+        videoCategory = categoryMap[categoryId] || `Category ID: ${categoryId}`;
+      } else {
+        console.warn(
+          `Could not fetch video details for ${videoId}:`,
+          videoData
+        );
+        videoCategory = "Unknown or Not Found";
+      }
+    } catch (videoError) {
+      console.error(
+        `Error fetching video category for ${videoId}:`,
+        videoError.message
+      );
+      videoCategory = "Error Fetching";
+    }
+
+    // --- Fetch Comments from YouTube ---
     const maxResults = 100;
     let allComments = [];
     let fetchedCommentCount = 0;
-    const maxCommentsToFetch = 100; // Limit to avoid excessive API usage
+    const maxCommentsToFetch = 500; // Limit to prevent excessive API calls
 
     do {
       let apiUrl = `https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId=${videoId}&maxResults=${maxResults}&key=${YOUTUBE_API_KEY}`;
@@ -86,11 +138,13 @@ app.get("/comments", async (req, res) => {
 
       if (!youtubeResponse.ok) {
         console.error("YouTube API responded with error:", youtubeData);
+        // If YouTube API itself fails, return early
         return res.status(youtubeResponse.status).json({
           message: youtubeData.error
             ? youtubeData.error.message
             : "Error from YouTube API",
           details: youtubeData.error ? youtubeData.error.errors : null,
+          videoCategory: videoCategory, // Still return category if fetched
         });
       }
 
@@ -99,7 +153,7 @@ app.get("/comments", async (req, res) => {
           .map((item) => {
             return item.snippet.topLevelComment.snippet.textOriginal;
           })
-          .filter((text) => text); // Filter out any empty comments
+          .filter((text) => text); // Filter out empty comments
 
         allComments = allComments.concat(commentsToAdd);
         fetchedCommentCount += commentsToAdd.length;
@@ -107,83 +161,100 @@ app.get("/comments", async (req, res) => {
 
       pageToken = youtubeData.nextPageToken;
 
-      // Small delay to be kind to YouTube API and manage rate limits
+      // Add a small delay to avoid hitting YouTube API rate limits too quickly
       if (pageToken && fetchedCommentCount < maxCommentsToFetch) {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
     } while (pageToken && fetchedCommentCount < maxCommentsToFetch);
 
     if (allComments.length === 0) {
-      return res
-        .status(200)
-        .json({ message: "No comments found or fetched.", comments: [] });
+      return res.status(200).json({
+        message: "No comments found or fetched.",
+        comments: [],
+        videoCategory: videoCategory,
+        themes: [],
+      });
     }
 
-    // --- Perform Sentiment and Entity Analysis CONCURRENTLY ---
+    // --- Perform Sentiment and Entity Analysis CONCURRENTLY using Promise.allSettled ---
     const analysisPromises = allComments.map(async (commentText) => {
+      let sentiment = { score: null, magnitude: null }; // Default nulls
+      let entities = []; // Default empty array
+      let commentError = null; // To store error specific to this comment's analysis
+
       try {
         const document = {
           content: commentText,
-          type: "PLAIN_TEXT",
+          type: "PLAIN_TEXT", // Assuming comments are plain text
         };
 
-        // Concurrent promises for sentiment AND entity analysis for each comment
-        const [sentimentResult, entityResult] = await Promise.all([
+        // Use Promise.allSettled to handle individual analysis failures gracefully
+        const [sentimentResult, entityResult] = await Promise.allSettled([
           languageClient.analyzeSentiment({ document: document }),
-          languageClient.analyzeEntities({ document: document }), // New: Entity Analysis
+          languageClient.analyzeEntities({ document: document }),
         ]);
 
-        const sentiment = sentimentResult.documentSentiment;
-        const entities = entityResult.entities; // Get entities from the result
+        // Process Sentiment Analysis Result
+        if (sentimentResult.status === "fulfilled") {
+          sentiment = sentimentResult.value[0].documentSentiment;
+        } else {
+          commentError = sentimentResult.reason.message;
+          console.warn(
+            `Sentiment analysis failed for comment: "${commentText}". Error: ${commentError}`
+          );
+        }
 
-        return {
-          text: commentText,
-          sentiment: {
-            score: sentiment.score,
-            magnitude: sentiment.magnitude,
-          },
-          // NEW: Include entities for each comment
-          entities: entities.map((entity) => ({
+        // Process Entity Analysis Result
+        if (entityResult.status === "fulfilled") {
+          entities = entityResult.value[0].entities.map((entity) => ({
             name: entity.name,
             type: entity.type,
-            salience: entity.salience, // Importance of the entity in the text (0.0 to 1.0)
-            // You can add more entity properties if needed, like sentiment for entity.
-            // Note: Entity sentiment is more complex and might not be available for all types or directly applicable.
-          })),
-        };
-      } catch (analysisError) {
+            salience: entity.salience,
+          }));
+        } else {
+          // If sentiment analysis also failed, prioritize that error, otherwise set this one
+          if (!commentError) commentError = entityResult.reason.message;
+          console.warn(
+            `Entity analysis failed for comment: "${commentText}". Error: ${entityResult.reason.message}`
+          );
+        }
+      } catch (overallCommentAnalysisError) {
+        // This catch block would only be hit if something fundamentally wrong happens outside the Promise.allSettled
+        commentError = overallCommentAnalysisError.message;
         console.warn(
-          `Could not analyze comment: "${commentText}". Error: ${analysisError.message}`
+          `Overall analysis setup failed for comment: "${commentText}". Error: ${commentError}`
         );
-        return {
-          text: commentText,
-          sentiment: {
-            score: null,
-            magnitude: null,
-            error: analysisError.message,
-          },
-          entities: [], // Return empty array on error
-        };
       }
+
+      return {
+        text: commentText,
+        sentiment: sentiment,
+        entities: entities,
+        error: commentError, // Include a general error flag for the comment if any analysis failed
+      };
     });
 
+    // Wait for all individual comment analysis promises to settle
     const commentsWithAnalysis = await Promise.all(analysisPromises);
 
-    // --- NEW: Process Entities to Find Common Themes ---
+    // --- Process Entities to Find Common Themes ---
     const themeCounts = {};
     const themeSentimentScores = {}; // To store sentiment for each theme
     const minSalienceForTheme = 0.05; // Entities below this salience might be less relevant
     const minThemeOccurrences = 2; // Only consider themes appearing at least X times
 
     commentsWithAnalysis.forEach((comment) => {
+      // Only process comments that had successful sentiment and entities analysis
       if (
-        comment.entities &&
         comment.sentiment &&
-        comment.sentiment.score !== null
+        typeof comment.sentiment.score === "number" &&
+        !isNaN(comment.sentiment.score) &&
+        comment.entities &&
+        comment.entities.length > 0
       ) {
         comment.entities.forEach((entity) => {
           // Filter for common types that are likely themes (PERSON, LOCATION, ORGANIZATION might be less relevant for general themes)
-          // Common types for themes: WORK_OF_ART, CONSUMER_GOOD, OTHER, EVENT, PRODUCT
+          // You can adjust these types based on what you consider a "theme"
           if (
             [
               "WORK_OF_ART",
@@ -234,18 +305,23 @@ app.get("/comments", async (req, res) => {
 
     res.status(200).json({
       message: `Successfully fetched and analyzed ${commentsWithAnalysis.length} comments.`,
-      comments: commentsWithAnalysis, // Still send individual comments if needed
+      comments: commentsWithAnalysis, // Still send individual comments if needed by frontend
       videoCategory: videoCategory,
       themes: commonThemes.slice(0, 5), // Return top 5 themes
     });
   } catch (error) {
-    console.error("Error in backend comment fetch:", error);
-    res
-      .status(500)
-      .json({ message: "Internal Server Error", error: error.message });
+    console.error(
+      "Error in backend comment fetch or overall analysis process:",
+      error
+    );
+    res.status(500).json({
+      message: "Internal Server Error",
+      error: error.message,
+      videoCategory: videoCategory,
+    }); // Include videoCategory even on top-level error
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server is listening on port: ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
