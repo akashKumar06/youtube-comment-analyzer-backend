@@ -1,0 +1,21 @@
+{
+  "name": "youtube-comment-analyzer-backend",
+  "version": "1.0.0",
+  "description": "backend for fetching comments",
+  "license": "ISC",
+  "author": "Akash Kumar",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "dotenvx run -- node index.js",
+    "dev": "dotenvx run --  nodemon index.js"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.45.2",
+    "@google-cloud/language": "^7.1.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "node-fetch": "^3.3.2"
+  }
+}
