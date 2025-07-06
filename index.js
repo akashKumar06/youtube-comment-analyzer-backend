@@ -8,11 +8,10 @@ const PORT = process.env.PORT || 3000;
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const GOOGLE_APPLICATION_CREDENTIALS =
-  process.env.GOOGLE_APPLICATION_CREDENTIALS; // Path to your service account key file
+  process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
 let languageClient;
 try {
-  // Initialize Natural Language Client only if GOOGLE_APPLICATION_CREDENTIALS is set
   if (GOOGLE_APPLICATION_CREDENTIALS) {
     languageClient = new LanguageServiceClient({
       keyFilename: GOOGLE_APPLICATION_CREDENTIALS,
@@ -28,15 +27,13 @@ try {
     "Failed to initialize Google Cloud Natural Language Client:",
     error
   );
-  languageClient = null; // Ensure client is null on initialization failure
+  languageClient = null;
 }
 
-app.use(cors()); // Enable CORS for all origins
-app.use(express.json()); // For parsing application/json
+app.use(cors());
+app.use(express.json());
 
-// YouTube Comment Analysis Endpoint
 app.get("/comments", async (req, res) => {
-  // Ensure videoCategory is always declared at the top level of the handler
   let videoCategory = "Unknown";
 
   try {
@@ -64,7 +61,6 @@ app.get("/comments", async (req, res) => {
       });
     }
 
-    // --- Fetch Video Details (including category) ---
     try {
       const videoApiUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${YOUTUBE_API_KEY}`;
       const videoResponse = await fetch(videoApiUrl);
@@ -72,7 +68,6 @@ app.get("/comments", async (req, res) => {
 
       if (videoResponse.ok && videoData.items && videoData.items.length > 0) {
         const categoryId = videoData.items[0].snippet.categoryId;
-        // Simple mapping for common categories. For a full list, you'd query YouTube's videoCategories API.
         const categoryMap = {
           1: "Film & Animation",
           2: "Autos & Vehicles",
@@ -138,13 +133,12 @@ app.get("/comments", async (req, res) => {
 
       if (!youtubeResponse.ok) {
         console.error("YouTube API responded with error:", youtubeData);
-        // If YouTube API itself fails, return early
         return res.status(youtubeResponse.status).json({
           message: youtubeData.error
             ? youtubeData.error.message
             : "Error from YouTube API",
           details: youtubeData.error ? youtubeData.error.errors : null,
-          videoCategory: videoCategory, // Still return category if fetched
+          videoCategory: videoCategory,
         });
       }
 
@@ -153,7 +147,7 @@ app.get("/comments", async (req, res) => {
           .map((item) => {
             return item.snippet.topLevelComment.snippet.textOriginal;
           })
-          .filter((text) => text); // Filter out empty comments
+          .filter((text) => text);
 
         allComments = allComments.concat(commentsToAdd);
         fetchedCommentCount += commentsToAdd.length;
@@ -178,17 +172,16 @@ app.get("/comments", async (req, res) => {
 
     // --- Perform Sentiment and Entity Analysis CONCURRENTLY using Promise.allSettled ---
     const analysisPromises = allComments.map(async (commentText) => {
-      let sentiment = { score: null, magnitude: null }; // Default nulls
-      let entities = []; // Default empty array
-      let commentError = null; // To store error specific to this comment's analysis
+      let sentiment = { score: null, magnitude: null };
+      let entities = [];
+      let commentError = null;
 
       try {
         const document = {
           content: commentText,
-          type: "PLAIN_TEXT", // Assuming comments are plain text
+          type: "PLAIN_TEXT",
         };
 
-        // Use Promise.allSettled to handle individual analysis failures gracefully
         const [sentimentResult, entityResult] = await Promise.allSettled([
           languageClient.analyzeSentiment({ document: document }),
           languageClient.analyzeEntities({ document: document }),
@@ -212,14 +205,12 @@ app.get("/comments", async (req, res) => {
             salience: entity.salience,
           }));
         } else {
-          // If sentiment analysis also failed, prioritize that error, otherwise set this one
           if (!commentError) commentError = entityResult.reason.message;
           console.warn(
             `Entity analysis failed for comment: "${commentText}". Error: ${entityResult.reason.message}`
           );
         }
       } catch (overallCommentAnalysisError) {
-        // This catch block would only be hit if something fundamentally wrong happens outside the Promise.allSettled
         commentError = overallCommentAnalysisError.message;
         console.warn(
           `Overall analysis setup failed for comment: "${commentText}". Error: ${commentError}`
@@ -230,21 +221,19 @@ app.get("/comments", async (req, res) => {
         text: commentText,
         sentiment: sentiment,
         entities: entities,
-        error: commentError, // Include a general error flag for the comment if any analysis failed
+        error: commentError,
       };
     });
 
-    // Wait for all individual comment analysis promises to settle
     const commentsWithAnalysis = await Promise.all(analysisPromises);
 
     // --- Process Entities to Find Common Themes ---
     const themeCounts = {};
-    const themeSentimentScores = {}; // To store sentiment for each theme
-    const minSalienceForTheme = 0.05; // Entities below this salience might be less relevant
-    const minThemeOccurrences = 2; // Only consider themes appearing at least X times
+    const themeSentimentScores = {};
+    const minSalienceForTheme = 0.05;
+    const minThemeOccurrences = 2;
 
     commentsWithAnalysis.forEach((comment) => {
-      // Only process comments that had successful sentiment and entities analysis
       if (
         comment.sentiment &&
         typeof comment.sentiment.score === "number" &&
@@ -253,8 +242,6 @@ app.get("/comments", async (req, res) => {
         comment.entities.length > 0
       ) {
         comment.entities.forEach((entity) => {
-          // Filter for common types that are likely themes (PERSON, LOCATION, ORGANIZATION might be less relevant for general themes)
-          // You can adjust these types based on what you consider a "theme"
           if (
             [
               "WORK_OF_ART",
@@ -266,7 +253,7 @@ app.get("/comments", async (req, res) => {
             ].includes(entity.type) &&
             entity.salience > minSalienceForTheme
           ) {
-            const themeName = entity.name.toLowerCase(); // Standardize to lowercase
+            const themeName = entity.name.toLowerCase();
 
             themeCounts[themeName] = (themeCounts[themeName] || 0) + 1;
             themeSentimentScores[themeName] = themeSentimentScores[
@@ -300,14 +287,13 @@ app.get("/comments", async (req, res) => {
       }
     }
 
-    // Sort themes by occurrences (most common first)
     commonThemes.sort((a, b) => b.occurrences - a.occurrences);
 
     res.status(200).json({
       message: `Successfully fetched and analyzed ${commentsWithAnalysis.length} comments.`,
-      comments: commentsWithAnalysis, // Still send individual comments if needed by frontend
+      comments: commentsWithAnalysis,
       videoCategory: videoCategory,
-      themes: commonThemes.slice(0, 5), // Return top 5 themes
+      themes: commonThemes.slice(0, 5),
     });
   } catch (error) {
     console.error(
@@ -318,7 +304,7 @@ app.get("/comments", async (req, res) => {
       message: "Internal Server Error",
       error: error.message,
       videoCategory: videoCategory,
-    }); // Include videoCategory even on top-level error
+    });
   }
 });
 
